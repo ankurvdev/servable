@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.17)
+project(servable)
+set(CMAKE_CXX_STANDARD 20)
+add_subdirectory(src)
+option(SERVABLE_BUILD_EXAMPLE "Build Example For servable" ON)
+if(SERVABLE_BUILD_EXAMPLE)
+	add_subdirectory(example)
+endif()
