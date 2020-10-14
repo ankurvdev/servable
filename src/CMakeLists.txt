@@ -47,7 +47,8 @@ endforeach()
 target_sources(servable PRIVATE ${SRC_S})
 
 find_package(Threads)
-target_link_libraries(servable PRIVATE udev readline ${CMAKE_DL_LIBS} Threads::Threads)
+find_library(LIBUDEV udev)
+target_link_libraries(servable PRIVATE ${LIBUDEV} readline ${CMAKE_DL_LIBS} Threads::Threads)
 target_compile_options(servable PRIVATE 
     -Wno-extern-c-compat
     -Wno-uninitialized

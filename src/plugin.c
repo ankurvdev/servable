@@ -1,1 +1,3 @@
-void plugin_cleanup() {}
+void plugin_cleanup()
+{
+}

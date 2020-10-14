@@ -1,17 +1,29 @@
-#include <stdexcept>
 #include <iostream>
-void UndefinedFuncThrow(const char *sym) try
+#include <stdexcept>
+void UndefinedFuncThrow(const char* sym)
+try
 {
-std::cerr << "Called unimplemented sym : " << sym << std::endl;
-throw std::logic_error(sym);
-}catch(...)
+    std::cerr << "Called unimplemented sym : " << sym << std::endl;
+    throw std::logic_error(sym);
+}
+catch (...)
 {
 }
-void UndefinedFunc(const char *sym)
+void UndefinedFunc(const char* sym)
 {
 }
-#define DUMMY_DEFINE(sym) extern "C" int sym() {  UndefinedFuncThrow(#sym); return 1;}
-#define VERIFIED_DUMMY_DEFINE(sym) extern "C" int sym() {  UndefinedFunc(#sym); return 1;}
+#define DUMMY_DEFINE(sym)         \
+    extern "C" int sym()          \
+    {                             \
+        UndefinedFuncThrow(#sym); \
+        return 1;                 \
+    }
+#define VERIFIED_DUMMY_DEFINE(sym) \
+    extern "C" int sym()           \
+    {                              \
+        UndefinedFunc(#sym);       \
+        return 1;                  \
+    }
 VERIFIED_DUMMY_DEFINE(g_dbus_register_interface)
 VERIFIED_DUMMY_DEFINE(g_dbus_unregister_interface)
 
