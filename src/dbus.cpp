@@ -1,13 +1,20 @@
 #include <stdexcept>
 #include <iostream>
-void UndefinedFunc(const char *sym) try
+void UndefinedFuncThrow(const char *sym) try
 {
 std::cerr << "Called unimplemented sym : " << sym << std::endl;
 throw std::logic_error(sym);
 }catch(...)
 {
 }
-#define DUMMY_DEFINE(sym) extern "C" int sym() {  UndefinedFunc(#sym); return 1;}
+void UndefinedFunc(const char *sym)
+{
+}
+#define DUMMY_DEFINE(sym) extern "C" int sym() {  UndefinedFuncThrow(#sym); return 1;}
+#define VERIFIED_DUMMY_DEFINE(sym) extern "C" int sym() {  UndefinedFunc(#sym); return 1;}
+VERIFIED_DUMMY_DEFINE(g_dbus_register_interface)
+VERIFIED_DUMMY_DEFINE(g_dbus_unregister_interface)
+
 DUMMY_DEFINE(dbus_connection_get_is_connected)
 DUMMY_DEFINE(dbus_connection_unref)
 DUMMY_DEFINE(dbus_error_free)
@@ -74,7 +81,6 @@ DUMMY_DEFINE(g_dbus_proxy_refresh_property)
 DUMMY_DEFINE(g_dbus_proxy_set_property_basic)
 DUMMY_DEFINE(g_dbus_proxy_set_property_watch)
 DUMMY_DEFINE(g_dbus_proxy_unref)
-DUMMY_DEFINE(g_dbus_register_interface)
 DUMMY_DEFINE(g_dbus_remove_watch)
 DUMMY_DEFINE(g_dbus_send_error)
 DUMMY_DEFINE(g_dbus_send_message)
@@ -83,5 +89,4 @@ DUMMY_DEFINE(g_dbus_send_reply)
 DUMMY_DEFINE(g_dbus_set_disconnect_function)
 DUMMY_DEFINE(g_dbus_set_flags)
 DUMMY_DEFINE(g_dbus_setup_bus)
-DUMMY_DEFINE(g_dbus_unregister_interface)
 DUMMY_DEFINE(rl_printf)
