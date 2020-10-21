@@ -18,6 +18,11 @@ set(GLOBS
     ${ROOT}/src/shared/*.c
 )
 
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bluetooth)
+file(GLOB bluetoothhdrs "${ROOT}/lib/*.h")
+foreach(hdr ${bluetoothhdrs})
+execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different "${hdr}" "${CMAKE_CURRENT_BINARY_DIR}/bluetooth" )
+endforeach()
 foreach(g ${GLOBS})
     file(GLOB l ${g})
     list(APPEND SRC_S ${l})
@@ -28,6 +33,7 @@ target_include_directories(servable PUBLIC
     ${ROOT}
     ${ROOT}/src
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 #target_include_directories(servable PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
