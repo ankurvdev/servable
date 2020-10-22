@@ -46,6 +46,7 @@ set(EXCLUDES
     "plugin.c"
     "advertising.c"
     "interactive.c"
+    "shell.c"
 )
 
 foreach(ex ${EXCLUDES})
