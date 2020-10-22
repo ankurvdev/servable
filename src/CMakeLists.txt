@@ -45,6 +45,7 @@ set(EXCLUDES
     "gatttool.c"
     "plugin.c"
     "advertising.c"
+    "interactive.c"
 )
 
 foreach(ex ${EXCLUDES})
@@ -53,7 +54,7 @@ endforeach()
 target_sources(servable PRIVATE ${SRC_S})
 
 find_package(Threads)
-target_link_libraries(servable PRIVATE readline ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(servable PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_compile_options(servable PRIVATE 
     -Wno-extern-c-compat
     -Wno-uninitialized
