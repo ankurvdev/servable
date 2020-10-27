@@ -59,4 +59,5 @@ target_link_libraries(servable PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_compile_options(servable PRIVATE 
     -Wno-extern-c-compat
     -Wno-uninitialized
+    -Wno-gnu-variable-sized-type-not-at-end
 )
