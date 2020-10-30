@@ -29,7 +29,7 @@ struct ICharacteristic
 
     virtual size_t ReadValue(std::span<uint8_t> buffer)      = 0;
     virtual void   WriteValue(std::span<const uint8_t> data) = 0;
-    void           NotifyUpdated();
+    void           NotifyUpdated() { throw std::logic_error("Not Implemented"); }
 
     std::unique_ptr<IBackendHandler> _handle;
 };
