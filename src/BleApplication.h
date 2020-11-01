@@ -34,6 +34,13 @@ struct ICharacteristic
     std::unique_ptr<IBackendHandler> _handle;
 };
 
+struct IRWNotifyCharacteristic : ICharacteristic
+{
+    virtual bool IsReadSupported() const override { return true; }
+    virtual bool IsWriteSupported() const override { return true; }
+    virtual bool AllowNotification() const override { return true; }
+};
+
 struct IReadNotifyCharacteristic : ICharacteristic
 {
     virtual bool IsReadSupported() const override { return true; }
@@ -52,14 +59,46 @@ struct IReadOnlyCharacteristic : ICharacteristic
 
 struct IService
 {
-    virtual UUID GetUUID() const   = 0;
-    virtual bool Advertise() const = 0;
+    virtual UUID GetUUID() const = 0;
+    virtual bool Advertise() const { return false; }
 
     virtual size_t           CharacteristicsCount() const   = 0;
     virtual ICharacteristic& CharacteristicAt(size_t index) = 0;
 
     std::unique_ptr<IBackendHandler> _handle;
 };
+
+template <typename... TChrs> struct Service : IService
+{
+    virtual size_t CharacteristicsCount() const override { return sizeof...(TChrs); }
+
+    template <size_t N> ICharacteristic& _GetAt(size_t index)
+    {
+        if (index == N)
+        {
+            return std::get<N>(_chrs);
+        }
+        if constexpr (N > 0)
+        {
+            return _GetAt<N - 1>(index);
+        }
+        throw std::out_of_range("Cannot determine the chars");
+    }
+
+    virtual ICharacteristic& CharacteristicAt(size_t index) override
+    {
+        if (index >= sizeof...(TChrs))
+        {
+            throw std::out_of_range("Cannot determine the chars");
+        }
+        return _GetAt<sizeof...(TChrs) - 1>(index);
+    }
+
+    std::tuple<TChrs...> _chrs;
+};
+
+template <typename... TChrs> using AdvService   = Service<TChrs...>;
+template <typename... TChrs> using QuietService = Service<TChrs...>;
 
 struct IApplication
 {
