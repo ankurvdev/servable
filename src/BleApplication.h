@@ -94,11 +94,10 @@ template <typename... TChrs> struct Service : IService
         return _GetAt<sizeof...(TChrs) - 1>(index);
     }
 
+    template <typename T> T& Get() { return std::get<T>(_chrs); }
+
     std::tuple<TChrs...> _chrs;
 };
-
-template <typename... TChrs> using AdvService   = Service<TChrs...>;
-template <typename... TChrs> using QuietService = Service<TChrs...>;
 
 struct IApplication
 {
@@ -112,5 +111,8 @@ struct IApplication
 
     std::unique_ptr<IBackendHandler> _handle;
 };
+
+template <typename... TChrs> using AdvService   = Service<TChrs...>;
+template <typename... TChrs> using QuietService = Service<TChrs...>;
 
 }    // namespace blegatt

@@ -57,9 +57,9 @@ extern "C"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
@@ -241,11 +241,12 @@ struct AdvertisementManager
 
         // bt_ad_add_appearance(_client.data.get(), _client.appearance);
 
-        auto adv = CMem<uint8_t>([&](size_t& len) { return bt_ad_generate(_client.data.get(), &len); });
-
-        if (adv.len > calc_max_adv_len(_features.max_adv_data_len, flags))
+        auto adv       = CMem<uint8_t>([&](size_t& len) { return bt_ad_generate(_client.data.get(), &len); });
+        auto maxadvlen = calc_max_adv_len(_features.max_adv_data_len, flags);
+        if (adv.len > maxadvlen)
         {
-            throw std::runtime_error("Advertising data too long or couldn't be generated.");
+            throw std::runtime_error("Advertising data too long. Len = " + std::to_string(adv.len)
+                                     + " MaxLen = " + std::to_string(maxadvlen));
         }
 
         // flags &= ~MGMT_ADV_FLAG_LOCAL_NAME;
