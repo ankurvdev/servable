@@ -1,5 +1,17 @@
 #include <iostream>
 #include <stdexcept>
+
+extern "C"
+{
+    void __btd_log_init(const char* debug, int detach) {}
+    void __btd_log_cleanup() {}
+    void info(const char* format, ...) {}
+    void btd_debug(uint16_t index, const char* format, ...) {}
+    void btd_info(uint16_t index, const char* format, ...) {}
+    void btd_warn(uint16_t index, const char* format, ...) {}
+    void btd_error(uint16_t index, const char* format, ...) {}
+}
+
 void UndefinedFuncThrow(const char* sym)
 try
 {
@@ -28,7 +40,10 @@ VERIFIED_DUMMY_DEFINE(g_dbus_register_interface)
 VERIFIED_DUMMY_DEFINE(g_dbus_unregister_interface)
 VERIFIED_DUMMY_DEFINE(g_dbus_emit_property_changed)
 VERIFIED_DUMMY_DEFINE(g_dbus_emit_property_changed_full)
-extern "C" int g_dbus_get_flags() { return 0;}
+extern "C" int g_dbus_get_flags()
+{
+    return 0;
+}
 
 DUMMY_DEFINE(dbus_connection_get_is_connected)
 DUMMY_DEFINE(dbus_connection_unref)
