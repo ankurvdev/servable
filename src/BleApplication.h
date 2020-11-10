@@ -15,6 +15,7 @@ struct IBackendHandler
 
 struct UUID : bt_uuid_t
 {
+    explicit UUID(uint16_t val) { bt_uuid16_create(this, val); }
     UUID(std::string_view str) { bt_string_to_uuid(this, str.data()); }
     UUID(char const* const str) { bt_string_to_uuid(this, str); }
 };
@@ -29,7 +30,8 @@ struct ICharacteristic
 
     virtual size_t ReadValue(std::span<uint8_t> buffer)      = 0;
     virtual void   WriteValue(std::span<const uint8_t> data) = 0;
-    void           NotifyUpdated() { throw std::logic_error("Not Implemented"); }
+
+    void NotifyUpdated();
 
     std::unique_ptr<IBackendHandler> _handle;
 };

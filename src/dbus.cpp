@@ -1,6 +1,6 @@
 #include <iostream>
 #include <stdexcept>
-
+#if 0
 extern "C"
 {
     void __btd_log_init(const char* debug, int detach) {}
@@ -11,7 +11,7 @@ extern "C"
     void btd_warn(uint16_t index, const char* format, ...) {}
     void btd_error(uint16_t index, const char* format, ...) {}
 }
-
+#endif
 void UndefinedFuncThrow(const char* sym)
 try
 {

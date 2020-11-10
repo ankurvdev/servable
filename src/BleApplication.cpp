@@ -16,14 +16,17 @@ extern "C"
 #endif
 
 #include <errno.h>
+#include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <glib.h>
@@ -35,31 +38,35 @@ extern "C"
 #include "gdbus/gdbus.h"
 #define class deviceclass
 
-#include "backtrace.h"
-#include "hcid.h"
+#include "lib/bluetooth.h"
+#include "lib/hci.h"
+#include "lib/hci_lib.h"
+#include "lib/l2cap.h"
 #include "lib/uuid.h"
+
+#include "src/shared/att.h"
+#include "src/shared/gatt-db.h"
+#include "src/shared/gatt-server.h"
+#include "src/shared/mainloop.h"
+#include "src/shared/queue.h"
+#include "src/shared/timeout.h"
+#include "src/shared/util.h"
+
+// Extra headers
+#include "lib/mgmt.h"
 #include "log.h"
 #include "shared/ad.h"
-#include "shared/att-types.h"
-#include "shared/gatt-db.h"
-#include "shared/mainloop.h"
 #include "shared/mgmt.h"
-#include "shared/util.h"
+#include "src/adapter.h"
+#include "src/gatt-database.h"
+#include "src/hcid.h"
 
-#include "adapter.h"
-#include "agent.h"
-#include "dbus-common.h"
-#include "gatt-database.h"
-
-#include "device.h"
-#include "mgmt.h"
-#include "profile.h"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
@@ -69,8 +76,20 @@ extern "C"
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
-
+#include <vector>
 struct main_opts main_opts;
+
+template <typename T> T* check_not_null(T* val, std::string_view const& errMessage)
+{
+    if (val == nullptr) throw std::runtime_error(std::string(errMessage));
+    return val;
+}
+
+int check_rc(int rc, std::string_view const& errMessage)
+{
+    if (rc < 0) throw std::runtime_error(std::string(errMessage));
+    return rc;
+}
 
 struct FreeDeleter
 {
@@ -81,268 +100,36 @@ template <typename T> struct CMem
 {
     template <typename TFunc> CMem(TFunc&& f)
     {
-        ptr = f(len);
-        if (ptr == nullptr || len == 0)
+        ptr = reinterpret_cast<T*>(f());
+        if (ptr == nullptr)
         {
             throw std::runtime_error("Empty Return");
         }
     }
     ~CMem() { free(ptr); }
 
-    T*     ptr{};
-    size_t len{0};
+    operator void*() { return reinterpret_cast<void*>(ptr); }
+
+    T* operator->() const noexcept { return ptr; }
+
+    T* ptr{};
+};
+
+struct FileDescriptor
+{
+    FileDescriptor(int fd) : _fd(fd)
+    {
+        if (_fd < 0) throw std::runtime_error("Failed to accept L2CAP ATT connection");
+    }
+    ~FileDescriptor() { close(_fd); }
+    operator int() const { return _fd; }
+
+    int _fd{};
 };
 
 void btd_exit(void)
 {
     mainloop_quit();
-}
-
-struct AdvertisementManager
-{
-    enum class Type
-    {
-        BroadCast  = 0,
-        Peripheral = 1
-    };
-
-    static AdvertisementManager& Get(uint16_t index)
-    {
-        _created.get_future().wait();
-        return *_managers[index];
-    }
-
-    AdvertisementManager(struct btd_adapter* adapter, struct mgmt* mgmt) : _adapter(adapter), _mgmt(mgmt)
-    {
-        if (adapter == nullptr) throw std::invalid_argument("Adapter null");
-        if (mgmt == nullptr) throw std::invalid_argument("Mgmt null");
-        mgmt_ref(mgmt);
-        btd_adapter_ref(adapter);
-        _adapterIndex = btd_adapter_get_index(adapter);
-        _adapterName  = btd_adapter_get_name(adapter);
-        uint8_t val   = 0x01;
-        if (!mgmt_send(mgmt, MGMT_OP_SET_POWERED, _adapterIndex, 1, &val, _AddAdvComplete, this, nullptr))
-        {
-            throw std::runtime_error("Unable to turn it on");
-        }
-
-        if (!mgmt_send(mgmt, MGMT_OP_READ_ADV_FEATURES, _adapterIndex, 0, NULL, _AdvFeatureReadComplete, this, nullptr))
-        {
-            throw std::runtime_error("Failed to read advertising features");
-        }
-
-        _managers[_adapterIndex] = this;
-        _created.set_value();
-    }
-
-    void _AcquireSlot()
-    {
-        std::unique_lock<std::mutex> lock(_mutex);
-        std::swap(_lock, lock);
-    }
-
-    void _ReleaseSlot() { _lock.release(); }
-
-    ~AdvertisementManager()
-    {
-        _managers.erase(_adapterIndex);
-        _AcquireSlot();
-        _ReleaseSlot();
-        _init.get_future().wait();
-        mgmt_unref(_mgmt);
-        btd_adapter_unref(_adapter);
-    }
-
-    void _InitComplete(mgmt_rp_read_adv_features const& features)
-    {
-        _features = features;
-        _supportedFlags |= _features.supported_flags;
-        _init.set_value();
-    }
-
-    static void _AdvFeatureReadComplete(uint8_t status, uint16_t length, const void* featp, void* thatp)
-    {
-        auto that = reinterpret_cast<AdvertisementManager*>(thatp);
-        auto feat = reinterpret_cast<mgmt_rp_read_adv_features const*>(featp);
-        try
-        {
-            if (status || !feat)
-            {
-                that->_init.set_exception(std::exception_ptr());
-                return;
-            }
-
-            if (length < sizeof(*feat))
-            {
-                that->_init.set_exception(std::exception_ptr());
-                return;
-            }
-            that->_InitComplete(*feat);
-        }
-        catch (...)
-        {
-            that->_init.set_exception(std::current_exception());
-        }
-    }
-
-    static size_t calc_max_adv_len(uint8_t max, uint32_t flags)
-    {
-        /*
-         * Flags which reduce the amount of space available for advertising.
-         * See doc/mgmt-api.txt
-         */
-        if (flags & MGMT_ADV_FLAG_TX_POWER) max -= 3;
-
-        if (flags & (MGMT_ADV_FLAG_DISCOV | MGMT_ADV_FLAG_LIMITED_DISCOV | MGMT_ADV_FLAG_MANAGED_FLAGS)) max -= 3;
-
-        if (flags & MGMT_ADV_FLAG_APPEARANCE) max -= 4;
-
-        return max;
-    }
-
-    static void _AddAdvComplete(uint8_t status, uint16_t length, const void* featp, void* thatp)
-    {
-        if (status)
-        {
-            error("Advertisement Refresh Failed with  status code : %d", status);
-        }
-        else
-        {
-            info("Advertisement Refreshed");
-        }
-    }
-
-    void AddServiceUUID(std::string_view str)
-    {
-        bt_uuid_t uuid;
-        bt_string_to_uuid(&uuid, str.data());
-        AddServiceUUID(uuid);
-    }
-    void AddServiceUUID(bt_uuid_t const& uuid) { bt_ad_add_service_uuid(_client.data.get(), &uuid); }
-    void Reset()
-    {
-        AdvClient client;
-        std::swap(_client, client);
-        Refresh();
-    }
-
-    void Refresh()
-    {
-        uint32_t flags = 0;
-
-        if (_client.type == Type::Peripheral)
-        {
-            flags |= MGMT_ADV_FLAG_CONNECTABLE;
-
-            if (btd_adapter_get_discoverable(_adapter) && !(bt_ad_has_flags(_client.data.get()))) flags |= MGMT_ADV_FLAG_DISCOV;
-        }
-
-        // flags |= _client.flags;
-
-        // bt_ad_add_appearance(_client.data.get(), _client.appearance);
-
-        auto adv       = CMem<uint8_t>([&](size_t& len) { return bt_ad_generate(_client.data.get(), &len); });
-        auto maxadvlen = calc_max_adv_len(_features.max_adv_data_len, flags);
-        if (adv.len > maxadvlen)
-        {
-            throw std::runtime_error("Advertising data too long. Len = " + std::to_string(adv.len)
-                                     + " MaxLen = " + std::to_string(maxadvlen));
-        }
-
-        // flags &= ~MGMT_ADV_FLAG_LOCAL_NAME;
-        // flags |= MGMT_ADV_FLAG_LOCAL_NAME
-        bt_ad_add_name(_client.scan.get(), _client.name ? _client.name : _adapterName.data());
-        auto scanRSP = CMem<uint8_t>([&](size_t& len) { return bt_ad_generate(_client.scan.get(), &len); });
-
-        std::unique_ptr<mgmt_cp_add_advertising, FreeDeleter> cpptr(
-            reinterpret_cast<mgmt_cp_add_advertising*>(malloc(sizeof(mgmt_cp_add_advertising) + adv.len + scanRSP.len)));
-
-        auto& cp = *cpptr;
-
-        uint8_t len     = sizeof(mgmt_cp_add_advertising) + adv.len + scanRSP.len;
-        cp.flags        = htobl(flags);
-        cp.instance     = _client.instance + 1;
-        cp.duration     = _client.duration;
-        cp.adv_data_len = adv.len;
-        cp.scan_rsp_len = scanRSP.len;
-        memcpy(cp.data, adv.ptr, adv.len);
-        memcpy(cp.data + adv.len, scanRSP.ptr, scanRSP.len);
-
-        if (!mgmt_send(_mgmt, MGMT_OP_ADD_ADVERTISING, _adapterIndex, len, &cp, _AddAdvComplete, nullptr, nullptr))
-        {
-            throw std::runtime_error("Failed to add Advertising Data");
-        }
-    }
-
-    /*
-            { "Type", parse_type },
-    { "ServiceUUIDs", parse_service_uuids },
-        { "SolicitUUIDs", parse_solicit_uuids },
-        { "ManufacturerData", parse_manufacturer_data },
-        { "ServiceData", parse_service_data },
-        { "Includes", parse_includes },
-        { "LocalName", parse_local_name },
-        { "Appearance", parse_appearance },
-        { "Duration", parse_duration },
-        { "Timeout", parse_timeout },
-        { "Data", parse_data },
-        { "Discoverable", parse_discoverable },
-        { "DiscoverableTimeout", parse_discoverable_timeout },
-        { "SecondaryChannel", parse_secondary },
-        */
-    struct AdvClient
-    {
-        struct AdDeleter
-        {
-            void operator()(struct bt_ad* ad) { bt_ad_unref(ad); }
-        };
-
-        using BTAd = std::unique_ptr<struct bt_ad, AdDeleter>;
-        BTAd data{bt_ad_new()};
-        BTAd scan{bt_ad_new()};
-
-        uint32_t    flags{0};
-        uint8_t     instance{0};
-        uint16_t    duration{0};
-        const char* name{nullptr};
-        Type        type{Type::Peripheral};
-        uint8_t     appearance{0};
-    } _client;
-
-    std::unique_lock<std::mutex> _lock;
-    std::mutex                   _mutex;
-    std::promise<void>           _init;
-    uint32_t                     _supportedFlags{MGMT_ADV_FLAG_LOCAL_NAME};
-    mgmt_rp_read_adv_features    _features{};
-    uint16_t                     _adapterIndex{0};
-    btd_adapter*                 _adapter{};
-    mgmt*                        _mgmt{};
-    std::string_view             _adapterName;
-
-    static inline std::promise<void>                                  _created;
-    static inline std::unordered_map<uint16_t, AdvertisementManager*> _managers;
-};
-
-extern "C" void* btd_adv_manager_new(struct btd_adapter* adapter, struct mgmt* mgmt)
-try
-{
-    DBG("LE Advertising Manager created for adapter: %s", adapter_get_path(adapter));
-    return new AdvertisementManager(adapter, mgmt);
-}
-catch (std::exception const& ex)
-{
-    DBG("Error Creating LE Advertisement Manager : %s", ex.what());
-    return nullptr;
-}
-
-extern "C" void btd_adv_manager_destroy(AdvertisementManager* manager)
-{
-    delete reinterpret_cast<AdvertisementManager*>(manager);
-}
-
-extern "C" void btd_adv_manager_refresh(AdvertisementManager* manager)
-{
-    manager->Refresh();
 }
 
 struct ChrcBackend
@@ -352,8 +139,35 @@ struct ChrcBackend
 
 namespace Bluez
 {
+struct Application : blegatt::IBackendHandler
+{
+    Application(int index);
+    ~Application()
+    {
+        if (gatt) bt_gatt_server_unref(gatt);
+        if (db) gatt_db_unref(db);
+        if (mgmt) mgmt_unref(mgmt);
+    }
+
+    void Init(int fd, uint16_t mtu);
+
+    uint16_t     adapterIndex{0};
+    bdaddr_t     addr;
+    int          addr_type;
+    struct mgmt* mgmt{nullptr};
+
+    int                    fd;
+    struct bt_att*         att{nullptr};
+    struct gatt_db*        db{nullptr};
+    struct bt_gatt_server* gatt{nullptr};
+    blegatt::IApplication* app{nullptr};
+    uint16_t               gatt_svc_chngd_handle{};
+    bool                   svc_chngd_enabled{false};
+};
+
 struct Service : blegatt::IBackendHandler
 {
+    Application*       app{nullptr};
     blegatt::IService* svc{nullptr};
     uint16_t           handle{};
     gatt_db_attribute* attr{nullptr};
@@ -361,6 +175,8 @@ struct Service : blegatt::IBackendHandler
 
 struct Characteristic : blegatt::IBackendHandler
 {
+    Application*              app{nullptr};
+    Service*                  svc{nullptr};
     blegatt::ICharacteristic* chrc{nullptr};
     uint16_t                  handle{};
     struct gatt_db_attribute* attr{nullptr};
@@ -385,14 +201,16 @@ struct Characteristic : blegatt::IBackendHandler
     {
         auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
         chrc->WriteValue({value, len});
+        gatt_db_attribute_write_result(attrib, id, 0);
     }
 };
+
 }    // namespace Bluez
 
-static void register_svcs_on_adapter(btd_adapter* adapter, void* ptr)
+static void register_svcs_on_db(Bluez::Application* app)
 {
-    auto that = reinterpret_cast<blegatt::IApplication*>(ptr);
-    auto db   = btd_gatt_database_get_db(btd_adapter_get_database(adapter));
+    auto db   = app->db;
+    auto that = app->app;
     for (size_t i = 0; i < that->ServiceCount(); i++)
     {
         auto& svc     = that->ServiceAt(i);
@@ -400,6 +218,7 @@ static void register_svcs_on_adapter(btd_adapter* adapter, void* ptr)
 
         /* Add Heart Rate Service */
         auto blzsvc    = new Bluez::Service();
+        blzsvc->app    = app;
         blzsvc->svc    = &svc;
         blzsvc->attr   = gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */);
         blzsvc->handle = gatt_db_attribute_get_handle(blzsvc->attr);
@@ -414,6 +233,8 @@ static void register_svcs_on_adapter(btd_adapter* adapter, void* ptr)
             if (chrc.IsWriteSupported()) properties |= BT_GATT_CHRC_PROP_READ;
 
             auto blzchrc  = new Bluez::Characteristic();
+            blzchrc->svc  = blzsvc;
+            blzchrc->app  = app;
             blzchrc->chrc = &chrc;
             blzchrc->attr = gatt_db_service_add_characteristic(blzsvc->attr,
                                                                &chrcuuid,
@@ -430,112 +251,517 @@ static void register_svcs_on_adapter(btd_adapter* adapter, void* ptr)
     }
 }
 
-static void register_svcs(blegatt::IApplication* that)
+void blegatt::ICharacteristic::NotifyUpdated()
 {
-    adapter_foreach(register_svcs_on_adapter, that);
+    auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
+    uint8_t buffer[64];
+    auto    bufsize = chrcbackend->chrc->ReadValue(std::span(buffer, std::size(buffer)));
+    bt_gatt_server_send_notification(chrcbackend->app->gatt, chrcbackend->handle, buffer, bufsize, false);
 }
 
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ *  BlueZ - Bluetooth protocol stack for Linux
+ *
+ *  Copyright (C) 2014  Google Inc.
+ *
+ *
+ */
+
+#define UUID_GAP 0x1800
+#define UUID_GATT 0x1801
+
+#define ATT_CID 4
+
+#define PRLOG(...)           \
+    do                       \
+    {                        \
+        printf(__VA_ARGS__); \
+    } while (0)
+
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+#define COLOR_OFF "\x1B[0m"
+#define COLOR_RED "\x1B[0;91m"
+#define COLOR_GREEN "\x1B[0;92m"
+#define COLOR_YELLOW "\x1B[0;93m"
+#define COLOR_BLUE "\x1B[0;94m"
+#define COLOR_MAGENTA "\x1B[0;95m"
+#define COLOR_BOLDGRAY "\x1B[1;30m"
+#define COLOR_BOLDWHITE "\x1B[1;37m"
+
+static void att_disconnect_cb(int err, void* user_data)
+{
+    printf("Device disconnected: %s\n", strerror(err));
+    mainloop_quit();
+}
+
+static void att_debug_cb(const char* str, void* user_data)
+{
+    const char* prefix = reinterpret_cast<const char*>(user_data);
+    PRLOG(COLOR_BOLDGRAY "%s" COLOR_BOLDWHITE "%s\n" COLOR_OFF, prefix, str);
+}
+
+static void gatt_debug_cb(const char* str, void* user_data)
+{
+    const char* prefix = reinterpret_cast<const char*>(user_data);
+    PRLOG(COLOR_GREEN "%s%s\n" COLOR_OFF, prefix, str);
+}
+
+static void gap_device_name_read_cb(struct gatt_db_attribute* attrib,
+                                    unsigned int              id,
+                                    uint16_t                  offset,
+                                    uint8_t                   opcode,
+                                    struct bt_att*            att,
+                                    void*                     user_data)
+{
+    Bluez::Application* server = reinterpret_cast<Bluez::Application*>(user_data);
+    uint8_t             error  = 0;
+    size_t              len    = 0;
+    const uint8_t*      value  = NULL;
+
+    PRLOG("GAP Device Name Read called\n");
+
+    auto deviceName = server->app->Name();
+    len             = deviceName.size();
+
+    if (offset > len)
+    {
+        error = BT_ATT_ERROR_INVALID_OFFSET;
+        goto done;
+    }
+
+    len -= offset;
+    value = len ? reinterpret_cast<const uint8_t*>(&deviceName.data()[offset]) : NULL;
+
+done:
+    gatt_db_attribute_read_result(attrib, id, error, value, len);
+}
+
+static void gap_device_name_ext_prop_read_cb(struct gatt_db_attribute* attrib,
+                                             unsigned int              id,
+                                             uint16_t                  offset,
+                                             uint8_t                   opcode,
+                                             struct bt_att*            att,
+                                             void*                     user_data)
+{
+    uint8_t value[2];
+
+    PRLOG("Device Name Extended Properties Read called\n");
+
+    value[0] = BT_GATT_CHRC_EXT_PROP_RELIABLE_WRITE;
+    value[1] = 0;
+
+    gatt_db_attribute_read_result(attrib, id, 0, value, sizeof(value));
+}
+
+static void gatt_service_changed_cb(struct gatt_db_attribute* attrib,
+                                    unsigned int              id,
+                                    uint16_t                  offset,
+                                    uint8_t                   opcode,
+                                    struct bt_att*            att,
+                                    void*                     user_data)
+{
+    PRLOG("Service Changed Read called\n");
+
+    gatt_db_attribute_read_result(attrib, id, 0, NULL, 0);
+}
+
+static void gatt_svc_chngd_ccc_read_cb(struct gatt_db_attribute* attrib,
+                                       unsigned int              id,
+                                       uint16_t                  offset,
+                                       uint8_t                   opcode,
+                                       struct bt_att*            att,
+                                       void*                     user_data)
+{
+    Bluez::Application* server = reinterpret_cast<Bluez::Application*>(user_data);
+
+    uint8_t value[2];
+
+    PRLOG("Service Changed CCC Read called\n");
+
+    value[0] = server->svc_chngd_enabled ? 0x02 : 0x00;
+    value[1] = 0x00;
+
+    gatt_db_attribute_read_result(attrib, id, 0, value, sizeof(value));
+}
+
+static void gatt_svc_chngd_ccc_write_cb(struct gatt_db_attribute* attrib,
+                                        unsigned int              id,
+                                        uint16_t                  offset,
+                                        const uint8_t*            value,
+                                        size_t                    len,
+                                        uint8_t                   opcode,
+                                        struct bt_att*            att,
+                                        void*                     user_data)
+{
+    Bluez::Application* server = reinterpret_cast<Bluez::Application*>(user_data);
+    uint8_t             ecode  = 0;
+
+    PRLOG("Service Changed CCC Write called\n");
+
+    if (!value || len != 2)
+    {
+        ecode = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+        goto done;
+    }
+
+    if (offset)
+    {
+        ecode = BT_ATT_ERROR_INVALID_OFFSET;
+        goto done;
+    }
+
+    if (value[0] == 0x00)
+        server->svc_chngd_enabled = false;
+    else if (value[0] == 0x02)
+        server->svc_chngd_enabled = true;
+    else
+        ecode = 0x80;
+
+    PRLOG("Service Changed Enabled: %s\n", server->svc_chngd_enabled ? "true" : "false");
+
+done:
+    gatt_db_attribute_write_result(attrib, id, ecode);
+}
+
+static void confirm_write(struct gatt_db_attribute* attr, int err, void* user_data)
+{
+    if (!err) return;
+
+    fprintf(stderr, "Error caching attribute %p - err: %d\n", attr, err);
+    exit(1);
+}
+
+static void populate_gap_service(Bluez::Application* server)
+{
+    bt_uuid_t                 uuid;
+    struct gatt_db_attribute *service, *tmp;
+    uint16_t                  appearance;
+
+    /* Add the GAP service */
+    bt_uuid16_create(&uuid, UUID_GAP);
+    service = gatt_db_add_service(server->db, &uuid, true, 6);
+
+    /*
+     * Device Name characteristic. Make the value dynamically read and
+     * written via callbacks.
+     */
+    bt_uuid16_create(&uuid, GATT_CHARAC_DEVICE_NAME);
+    gatt_db_service_add_characteristic(
+        service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_EXT_PROP, gap_device_name_read_cb, nullptr, server);
+
+    bt_uuid16_create(&uuid, GATT_CHARAC_EXT_PROPER_UUID);
+    gatt_db_service_add_descriptor(service, &uuid, BT_ATT_PERM_READ, gap_device_name_ext_prop_read_cb, NULL, server);
+
+    /*
+     * Appearance characteristic. Reads and writes should obtain the value
+     * from the database.
+     */
+    bt_uuid16_create(&uuid, GATT_CHARAC_APPEARANCE);
+    tmp = gatt_db_service_add_characteristic(service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ, NULL, NULL, server);
+
+    /*
+     * Write the appearance value to the database, since we're not using a
+     * callback.
+     */
+    put_le16(128, &appearance);
+    gatt_db_attribute_write(tmp, 0, (uint8_t*)&appearance, sizeof(appearance), BT_ATT_OP_WRITE_REQ, NULL, confirm_write, NULL);
+
+    gatt_db_service_set_active(service, true);
+}
+
+static void populate_gatt_service(Bluez::Application* server)
+{
+    bt_uuid_t                 uuid;
+    struct gatt_db_attribute *service, *svc_chngd;
+
+    /* Add the GATT service */
+    bt_uuid16_create(&uuid, UUID_GATT);
+    service = gatt_db_add_service(server->db, &uuid, true, 4);
+
+    bt_uuid16_create(&uuid, GATT_CHARAC_SERVICE_CHANGED);
+    svc_chngd = gatt_db_service_add_characteristic(
+        service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE, gatt_service_changed_cb, NULL, server);
+    server->gatt_svc_chngd_handle = gatt_db_attribute_get_handle(svc_chngd);
+
+    bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
+    gatt_db_service_add_descriptor(
+        service, &uuid, BT_ATT_PERM_READ | BT_ATT_PERM_WRITE, gatt_svc_chngd_ccc_read_cb, gatt_svc_chngd_ccc_write_cb, server);
+
+    gatt_db_service_set_active(service, true);
+}
+
+Bluez::Application::Application(int index)
+{
+    adapterIndex = index;
+    check_rc(hci_devba(index, &addr), "Cannot find hci0");
+    char ba[18];
+    ba2str(&addr, ba);
+    printf("Local: %s\n", ba);
+    addr_type = BDADDR_LE_PUBLIC;
+    db        = check_not_null(gatt_db_new(), "Failed to create GATT database");
+    mgmt      = check_not_null(mgmt_new_default(), "Failed to access management interface");
+}
+
+void Bluez::Application::Init(int fd, uint16_t mtu)
+{
+    att = check_not_null(bt_att_new(fd, false), "Failed to initialze ATT transport layer");
+    if (!bt_att_set_close_on_unref(att, true)) throw std::runtime_error("Failed to set up ATT transport layer\n");
+    if (!bt_att_register_disconnect(att, att_disconnect_cb, NULL, NULL)) throw std::runtime_error("Failed to set ATT disconnect handler\n");
+
+    gatt = check_not_null(bt_gatt_server_new(db, att, mtu, 0), "Failed to create GATT server");
+
+    bt_att_set_debug(att, att_debug_cb, (void*)"att: ", NULL);
+    bt_gatt_server_set_debug(gatt, gatt_debug_cb, (void*)"server: ", NULL);
+
+    populate_gap_service(this);
+    populate_gatt_service(this);
+    register_svcs_on_db(this);
+}
+
+static void mgmt_generic_callback_complete(uint8_t status, uint16_t length, const void* param, void* user_data)
+{
+    if (status != MGMT_STATUS_SUCCESS)
+    {
+        fprintf(stderr, "%s failed: %s\n", (char*)user_data, mgmt_errstr(status));
+        return;
+    }
+
+    printf("%s completed\n", (char*)user_data);
+}
+
+static void mgmt_generic_event(uint16_t index, uint16_t length, const void* param, void* user_data)
+{
+    printf("%s\n", (char*)user_data);
+}
+
+static std::vector<uint8_t> bt_ad_generate_data(Bluez::Application* server)
+{
+    struct bt_ad* data = check_not_null(bt_ad_new(), "Error creating adverting data\n");
+
+    for (size_t i = 0; i < server->app->ServiceCount(); i++)
+    {
+        auto& svc = server->app->ServiceAt(i);
+        if (!svc.Advertise()) continue;
+        auto uuid = svc.GetUUID();
+        check_rc(bt_ad_add_service_uuid(data, &uuid), "Error adding service UUID\n");
+    }
+
+    size_t adv_data_len;
+    auto   adv_data = check_not_null(bt_ad_generate(data, &adv_data_len), "Error generating advertising data");
+    bt_ad_unref(data);
+    std::vector<uint8_t> rslt;
+    rslt.reserve(adv_data_len);
+    for (size_t i = 0; i < adv_data_len; i++)
+    {
+        rslt.push_back(adv_data[i]);
+    }
+    free(adv_data);
+    return rslt;
+}
+static void advertise(Bluez::Application* server)
+{
+    uint8_t  load_conn_params_len;
+    uint8_t  add_adv_len;
+    uint32_t flags;
+
+    auto    adv_data     = bt_ad_generate_data(server);
+    auto    adv_data_len = adv_data.size();
+    uint8_t val          = 0x00;
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_SET_POWERED,
+                       server->adapterIndex,
+                       1,
+                       &val,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_SET_POWERED",
+                       NULL),
+             "Failed setting powered off");
+    load_conn_params_len = sizeof(struct mgmt_cp_load_conn_param) + sizeof(struct mgmt_conn_param);
+    CMem<struct mgmt_cp_load_conn_param> load_conn_params([&]() { return malloc0(load_conn_params_len); });
+    CMem<struct mgmt_conn_param>         conn_param([&]() { return malloc0(sizeof(struct mgmt_conn_param)); });
+
+    bacpy(&conn_param->addr.bdaddr, &server->addr);
+    conn_param->addr.type         = server->addr_type;
+    conn_param->min_interval      = 6;
+    conn_param->max_interval      = 12;
+    conn_param->latency           = 0;
+    conn_param->timeout           = 200;
+    load_conn_params->param_count = 1;
+    memcpy(load_conn_params->params, conn_param, sizeof(struct mgmt_conn_param));
+
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_LOAD_CONN_PARAM,
+                       server->adapterIndex,
+                       load_conn_params_len,
+                       load_conn_params,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_LOAD_CONN_PARAM",
+                       NULL),
+             "Failed to load connection parameters\n");
+
+    CMem<struct mgmt_cp_set_local_name> localname([&]() { return malloc0(sizeof(struct mgmt_cp_set_local_name)); });
+
+    auto   name = server->app->Name();
+    size_t i    = 0;
+    for (i = 0; i < name.size() && i < std::size(localname->name) - 1 && i < std::size(localname->short_name) - 1; i++)
+    {
+        localname->short_name[i] = localname->name[i] = static_cast<uint8_t>(name[i]);
+    }
+    localname->name[i]       = 0;
+    localname->short_name[i] = 0;
+
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_SET_LOCAL_NAME,
+                       server->adapterIndex,
+                       sizeof(struct mgmt_cp_set_local_name),
+                       localname,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_SET_LOCAL_NAME",
+                       NULL),
+             "Failed setting local name\n");
+
+    val = 0x01;
+    check_rc(
+        mgmt_send(
+            server->mgmt, MGMT_OP_SET_LE, server->adapterIndex, 1, &val, mgmt_generic_callback_complete, (void*)"MGMT_OP_SET_LE", NULL),
+        "Failed setting low energy\n");
+
+    val = 0x01;
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_SET_CONNECTABLE,
+                       server->adapterIndex,
+                       1,
+                       &val,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_SET_CONNECTABLE",
+                       NULL),
+             "Failed setting connectable\n");
+
+    add_adv_len = sizeof(struct mgmt_cp_add_advertising) + adv_data_len;
+    CMem<struct mgmt_cp_add_advertising> add_adv([&]() { return malloc0(add_adv_len); });
+    // struct mgmt_cp_add_advertising*      add_adv = add_adv_tracker.ptr;
+
+    flags                 = MGMT_ADV_FLAG_CONNECTABLE | MGMT_ADV_FLAG_DISCOV;
+    add_adv->instance     = 1;
+    add_adv->flags        = htobl(flags);
+    add_adv->duration     = 0;
+    add_adv->timeout      = 0;
+    add_adv->adv_data_len = adv_data_len;
+    add_adv->scan_rsp_len = 0;
+    memcpy(add_adv->data, adv_data.data(), adv_data_len);
+
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_ADD_ADVERTISING,
+                       server->adapterIndex,
+                       add_adv_len,
+                       add_adv,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_ADD_ADVERTISING",
+                       NULL),
+             "Failed to add advertising");
+
+    mgmt_register(
+        server->mgmt, MGMT_EV_DEVICE_CONNECTED, server->adapterIndex, mgmt_generic_event, (void*)"MGMT_EV_DEVICE_CONNECTED", NULL);
+
+    mgmt_register(
+        server->mgmt, MGMT_EV_DEVICE_DISCONNECTED, server->adapterIndex, mgmt_generic_event, (void*)"MGMT_EV_DEVICE_DISCONNECTED", NULL);
+
+    val = 0x01;
+    check_rc(mgmt_send(server->mgmt,
+                       MGMT_OP_SET_POWERED,
+                       server->adapterIndex,
+                       1,
+                       &val,
+                       mgmt_generic_callback_complete,
+                       (void*)"MGMT_OP_SET_POWERED",
+                       NULL),
+             "Failed setting powered on");
+}
+
+static void att_conn_callback(int fd, uint32_t events, void* user_data)
+{
+    Bluez::Application* server = reinterpret_cast<Bluez::Application*>(user_data);
+
+    int                new_fd;
+    struct sockaddr_l2 addr;
+    socklen_t          optlen;
+    char               ba[18];
+    uint16_t           mtu = 0;
+
+    memset(&addr, 0, sizeof(addr));
+    optlen = sizeof(addr);
+    new_fd = accept(fd, (struct sockaddr*)&addr, &optlen);
+    if (new_fd < 0)
+    {
+        perror("Accept failed");
+        return;
+    }
+
+    ba2str(&addr.l2_bdaddr, ba);
+    printf("Connect from %s\n", ba);
+
+    server->Init(new_fd, mtu);
+}
+
+static int l2cap_le_att_listen(bdaddr_t* src, uint8_t sec, uint8_t src_type)
+{
+    int                sk;
+    struct sockaddr_l2 srcaddr;
+    struct bt_security btsec;
+
+    sk = check_rc(socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP), "Failed to create L2CAP socket");
+
+    /* Set up source address */
+    memset(&srcaddr, 0, sizeof(srcaddr));
+    srcaddr.l2_family      = AF_BLUETOOTH;
+    srcaddr.l2_cid         = htobs(ATT_CID);
+    srcaddr.l2_bdaddr_type = src_type;
+    bacpy(&srcaddr.l2_bdaddr, src);
+
+    check_rc(bind(sk, (struct sockaddr*)&srcaddr, sizeof(srcaddr)), "Failed to bind L2CAP socket");
+
+    /* Set the security level */
+    memset(&btsec, 0, sizeof(btsec));
+    btsec.level = sec;
+    check_rc(setsockopt(sk, SOL_BLUETOOTH, BT_SECURITY, &btsec, sizeof(btsec)), "Failed to set L2CAP security level\n");
+    check_rc(listen(sk, 10), "Listening on socket failed");
+    return sk;
+}
 void blegatt::IApplication::Start()
 {
-    /*
-       [General]
-       Name = AViD
-       Class = 0x010500
-       DiscoverableTimeout = 0
-       PairableTimeout = 0
-       ControllerMode = le
-
-       [GATT]
-
-       [Policy]
-       AutoEnable=true
-       */
-
-    // Policy : AutoEnable = true
-    // btd_adapter_restore_powered(adapter);
-
-    uint8_t major = 1, minor = 0;
-
-    /* Default HCId settings */
-    memset(&main_opts, 0, sizeof(main_opts));
-    main_opts.name              = strdup(Name().data());
-    main_opts.deviceclass       = 0x010500;
-    main_opts.pairto            = 0;    // DEFAULT_PAIRABLE_TIMEOUT;
-    main_opts.discovto          = 0;    // DEFAULT_DISCOVERABLE_TIMEOUT;
-    main_opts.tmpto             = DEFAULT_TEMPORARY_TIMEOUT;
-    main_opts.reverse_discovery = TRUE;
-    main_opts.name_resolv       = TRUE;
-    main_opts.debug_keys        = FALSE;
-    main_opts.refresh_discovery = TRUE;
-    main_opts.mode              = BT_MODE_LE;    // BT_MODE_BREDR BT_MODE_DUAL
-
-    main_opts.default_params.num_entries       = 0;
-    main_opts.default_params.br_page_scan_type = 0xFFFF;
-    main_opts.default_params.br_scan_type      = 0xFFFF;
-
-    main_opts.did_source  = 0x0002; /* USB */
-    main_opts.did_vendor  = 0x1d6b; /* Linux Foundation */
-    main_opts.did_product = 0x0246; /* BlueZ */
-    main_opts.did_version = (major << 8 | minor);
-
-    main_opts.gatt_cache    = BT_GATT_CACHE_ALWAYS;
-    main_opts.gatt_mtu      = BT_ATT_MAX_LE_MTU;
-    main_opts.gatt_channels = 3;
-
-    umask(0077);
-
-    btd_backtrace_init();
+    uint8_t src_type = BDADDR_LE_PUBLIC;
 
     mainloop_init();
 
-    __btd_log_init("*" /* debug */, 0 /* detach */);
+    auto server = new Bluez::Application(0);
 
-    mainloop_sd_notify("STATUS=Starting up");
+    FileDescriptor fd(l2cap_le_att_listen(&server->addr, BT_SECURITY_LOW, src_type));
 
-    if (adapter_init() < 0)
+    server->app = this;
+    this->_handle.reset(server);
+
+    check_rc(mainloop_add_fd(fd, EPOLLIN, att_conn_callback, server, NULL), "Erro adding connection callback to mainloop");
+    advertise(server);
+#if 0
+    AdvertisementManager adv(0, server->mgmt);
+    
+    for (size_t i = 0; i < server->app->ServiceCount(); i++)
     {
-        throw std::runtime_error("Adapter handling initialization failed");
-        exit(1);
+        auto& svc = server->app->ServiceAt(i);
+        if (!svc.Advertise()) continue;
+        adv.AddServiceUUID(svc.GetUUID());
     }
-
-    btd_device_init();
-    btd_agent_init();
-    btd_profile_init();
-
-    rfkill_init();
-
-    DBG("Entering main loop");
-    auto ftr = std::async([this]() {
-        auto& mgr = AdvertisementManager::Get(0);
-        register_svcs(this);
-
-        for (size_t i = 0; i < ServiceCount(); i++)
-        {
-            auto& svc = ServiceAt(i);
-            if (svc.Advertise())
-            {
-                mgr.AddServiceUUID(svc.GetUUID());
-            }
-        }
-        mgr.Refresh();
-    });
-    mainloop_sd_notify("STATUS=Running");
-    mainloop_sd_notify("READY=1");
+    adv.Refresh();
+#endif
+    printf("Running GATT server\n");
 
     mainloop_run();
+    this->_handle.reset(nullptr);
+    // mainloop_quit();
 
-    mainloop_sd_notify("STATUS=Quitting");
-
-    plugin_cleanup();
-
-    btd_profile_cleanup();
-    btd_agent_cleanup();
-    btd_device_cleanup();
-
-    adapter_cleanup();
-
-    rfkill_exit();
-    info("Exit");
-
-    __btd_log_cleanup();
+    printf("\n\nShutting down...\n");
 }

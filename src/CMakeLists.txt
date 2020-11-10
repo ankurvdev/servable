@@ -40,14 +40,15 @@ target_include_directories(servable PUBLIC
 set(EXCLUDES
     "btp"
     "-ell"
+    "-glib.c"
     "/main.c"
-    "mainloop.c"
+    "mainloop-glib.c"
     "gatttool.c"
     "plugin.c"
     "advertising.c"
     "interactive.c"
     "shell.c"
-    "log.c"
+#    "log.c"
 )
 
 foreach(ex ${EXCLUDES})
