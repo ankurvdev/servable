@@ -77,8 +77,9 @@ extern "C"
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
-struct main_opts main_opts;
-
+struct main_opts         main_opts;
+static std::mutex        globalMutex;
+static bool              restart = false;
 template <typename T> T* check_not_null(T* val, std::string_view const& errMessage)
 {
     if (val == nullptr) throw std::runtime_error(std::string(errMessage));
@@ -149,6 +150,7 @@ struct Application : blegatt::IBackendHandler
         if (mgmt) mgmt_unref(mgmt);
     }
 
+    void Clear();
     void Init(int fd, uint16_t mtu);
 
     uint16_t     adapterIndex{0};
@@ -183,11 +185,19 @@ struct Characteristic : blegatt::IBackendHandler
 
     static void ReadCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr)
     {
-        auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
+        try
+        {
+            auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
 
-        uint8_t buffer[24];
-        auto    len = chrc->ReadValue(buffer);
-        gatt_db_attribute_read_result(attrib, id, 0, buffer, len);
+            uint8_t buffer[24];
+            auto    len = chrc->ReadValue(buffer);
+            gatt_db_attribute_read_result(attrib, id, 0, buffer, len);
+        }
+        catch (std::exception const& ex)
+        {
+            std::cerr << "Error reading Char Value: " << ex.what() << std::endl;
+            gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
+        }
     }
 
     static void WriteCallback(gatt_db_attribute* attrib,
@@ -207,52 +217,10 @@ struct Characteristic : blegatt::IBackendHandler
 
 }    // namespace Bluez
 
-static void register_svcs_on_db(Bluez::Application* app)
-{
-    auto db   = app->db;
-    auto that = app->app;
-    for (size_t i = 0; i < that->ServiceCount(); i++)
-    {
-        auto& svc     = that->ServiceAt(i);
-        auto  svcuuid = svc.GetUUID();
-
-        /* Add Heart Rate Service */
-        auto blzsvc    = new Bluez::Service();
-        blzsvc->app    = app;
-        blzsvc->svc    = &svc;
-        blzsvc->attr   = gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */);
-        blzsvc->handle = gatt_db_attribute_get_handle(blzsvc->attr);
-        svc._handle.reset(blzsvc);
-        for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
-        {
-            auto&   chrc       = svc.CharacteristicAt(j);
-            auto    chrcuuid   = chrc.GetUUID();
-            uint8_t properties = 0;
-            if (chrc.AllowNotification()) properties |= BT_GATT_CHRC_PROP_NOTIFY;
-            if (chrc.IsReadSupported()) properties |= BT_GATT_CHRC_PROP_READ;
-            if (chrc.IsWriteSupported()) properties |= BT_GATT_CHRC_PROP_READ;
-
-            auto blzchrc  = new Bluez::Characteristic();
-            blzchrc->svc  = blzsvc;
-            blzchrc->app  = app;
-            blzchrc->chrc = &chrc;
-            blzchrc->attr = gatt_db_service_add_characteristic(blzsvc->attr,
-                                                               &chrcuuid,
-                                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-                                                               properties,
-                                                               Bluez::Characteristic::ReadCallback,
-                                                               Bluez::Characteristic::WriteCallback,
-                                                               blzchrc);
-
-            blzchrc->handle = gatt_db_attribute_get_handle(blzchrc->attr);
-            chrc._handle.reset(blzchrc);
-        }
-        gatt_db_service_set_active(blzsvc->attr, true);
-    }
-}
-
 void blegatt::ICharacteristic::NotifyUpdated()
 {
+    std::unique_lock<std::mutex> lock(globalMutex);
+    if (!_handle.get()) return;
     auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
     uint8_t buffer[64];
     auto    bufsize = chrcbackend->chrc->ReadValue(std::span(buffer, std::size(buffer)));
@@ -295,6 +263,7 @@ void blegatt::ICharacteristic::NotifyUpdated()
 static void att_disconnect_cb(int err, void* user_data)
 {
     printf("Device disconnected: %s\n", strerror(err));
+    restart = true;
     mainloop_quit();
 }
 
@@ -506,8 +475,26 @@ Bluez::Application::Application(int index)
     mgmt      = check_not_null(mgmt_new_default(), "Failed to access management interface");
 }
 
+void Bluez::Application::Clear()
+{
+    auto that = app;
+    for (size_t i = 0; i < that->ServiceCount(); i++)
+    {
+        auto& svc = that->ServiceAt(i);
+        svc._handle.reset(nullptr);
+        for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
+        {
+            auto& chrc = svc.CharacteristicAt(j);
+            chrc._handle.reset(nullptr);
+        }
+    }
+    that->_handle.reset(nullptr);
+}
+
 void Bluez::Application::Init(int fd, uint16_t mtu)
 {
+    std::unique_lock<std::mutex> lock(globalMutex);
+
     att = check_not_null(bt_att_new(fd, false), "Failed to initialze ATT transport layer");
     if (!bt_att_set_close_on_unref(att, true)) throw std::runtime_error("Failed to set up ATT transport layer\n");
     if (!bt_att_register_disconnect(att, att_disconnect_cb, NULL, NULL)) throw std::runtime_error("Failed to set ATT disconnect handler\n");
@@ -519,7 +506,45 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
 
     populate_gap_service(this);
     populate_gatt_service(this);
-    register_svcs_on_db(this);
+    auto that = this->app;
+    for (size_t i = 0; i < that->ServiceCount(); i++)
+    {
+        auto& svc     = that->ServiceAt(i);
+        auto  svcuuid = svc.GetUUID();
+
+        /* Add Heart Rate Service */
+        auto blzsvc    = new Bluez::Service();
+        blzsvc->app    = this;
+        blzsvc->svc    = &svc;
+        blzsvc->attr   = gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */);
+        blzsvc->handle = gatt_db_attribute_get_handle(blzsvc->attr);
+        svc._handle.reset(blzsvc);
+        for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
+        {
+            auto&   chrc       = svc.CharacteristicAt(j);
+            auto    chrcuuid   = chrc.GetUUID();
+            uint8_t properties = 0;
+            if (chrc.AllowNotification()) properties |= BT_GATT_CHRC_PROP_NOTIFY;
+            if (chrc.IsReadSupported()) properties |= BT_GATT_CHRC_PROP_READ;
+            if (chrc.IsWriteSupported()) properties |= BT_GATT_CHRC_PROP_READ;
+
+            auto blzchrc  = new Bluez::Characteristic();
+            blzchrc->svc  = blzsvc;
+            blzchrc->app  = this;
+            blzchrc->chrc = &chrc;
+            blzchrc->attr = gatt_db_service_add_characteristic(blzsvc->attr,
+                                                               &chrcuuid,
+                                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+                                                               properties,
+                                                               Bluez::Characteristic::ReadCallback,
+                                                               Bluez::Characteristic::WriteCallback,
+                                                               blzchrc);
+
+            blzchrc->handle = gatt_db_attribute_get_handle(blzchrc->attr);
+            chrc._handle.reset(blzchrc);
+        }
+        gatt_db_service_set_active(blzsvc->attr, true);
+    }
 }
 
 static void mgmt_generic_callback_complete(uint8_t status, uint16_t length, const void* param, void* user_data)
@@ -760,8 +785,16 @@ void blegatt::IApplication::Start()
     printf("Running GATT server\n");
 
     mainloop_run();
-    this->_handle.reset(nullptr);
-    // mainloop_quit();
-
-    printf("\n\nShutting down...\n");
+    {
+        std::unique_lock<std::mutex> lock(globalMutex);
+        server->Clear();
+        this->_handle.reset(nullptr);
+        // mainloop_quit();
+        printf("\n\nShutting down...\n");
+    }
+    if (restart)
+    {
+        restart = false;
+        Start();
+    }
 }
