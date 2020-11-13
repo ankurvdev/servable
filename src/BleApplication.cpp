@@ -77,6 +77,8 @@ extern "C"
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include <iostream>
+
 struct main_opts         main_opts;
 static std::mutex        globalMutex;
 static bool              restart = false;
