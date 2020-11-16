@@ -18,6 +18,15 @@ struct UUID : bt_uuid_t
     explicit UUID(uint16_t val) { bt_uuid16_create(this, val); }
     UUID(std::string_view str) { bt_string_to_uuid(this, str.data()); }
     UUID(char const* const str) { bt_string_to_uuid(this, str); }
+
+    bool operator==(UUID const& r) const { return bt_uuid_cmp(this, &r) == 0; }
+
+    operator std::string() const
+    {
+        char buffer[40];
+        bt_uuid_to_string(this, buffer, std::size(buffer));
+        return std::string(buffer);
+    }
 };
 
 struct ICharacteristic

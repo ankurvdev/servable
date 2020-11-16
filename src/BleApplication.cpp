@@ -64,20 +64,21 @@ extern "C"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
 
 #include <future>
+#include <iostream>
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
-#include <iostream>
 
 struct main_opts         main_opts;
 static std::mutex        globalMutex;
@@ -93,6 +94,14 @@ int check_rc(int rc, std::string_view const& errMessage)
     if (rc < 0) throw std::runtime_error(std::string(errMessage));
     return rc;
 }
+
+namespace std
+{
+template <> struct hash<blegatt::UUID>
+{
+    size_t operator()(blegatt::UUID const& obj) const { return std::hash<std::string>{}(obj); }
+};
+}    // namespace std
 
 struct FreeDeleter
 {
@@ -189,8 +198,10 @@ struct Characteristic : blegatt::IBackendHandler
     {
         try
         {
-            auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
-
+            auto blzchrc = reinterpret_cast<Characteristic*>(cbptr);
+            auto& chrc = blzchrc->chrc;
+            std::cout << "Requesting Read for Chrc: " << (std::string)chrc->GetUUID() << " Handle:" << blzchrc->handle
+                      << " Chrc:" << static_cast<void*>(chrc) << " Backend:" << static_cast<void*>(blzchrc) <<std::endl;
             uint8_t buffer[24];
             auto    len = chrc->ReadValue(buffer);
             gatt_db_attribute_read_result(attrib, id, 0, buffer, len);
@@ -221,6 +232,7 @@ struct Characteristic : blegatt::IBackendHandler
 
 void blegatt::ICharacteristic::NotifyUpdated()
 {
+    return;
     std::unique_lock<std::mutex> lock(globalMutex);
     if (!_handle.get()) return;
     auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
@@ -495,8 +507,8 @@ void Bluez::Application::Clear()
 
 void Bluez::Application::Init(int fd, uint16_t mtu)
 {
-    std::unique_lock<std::mutex> lock(globalMutex);
-
+    std::unique_lock<std::mutex>      lock(globalMutex);
+    std::unordered_set<blegatt::UUID> uuids;
     att = check_not_null(bt_att_new(fd, false), "Failed to initialze ATT transport layer");
     if (!bt_att_set_close_on_unref(att, true)) throw std::runtime_error("Failed to set up ATT transport layer\n");
     if (!bt_att_register_disconnect(att, att_disconnect_cb, NULL, NULL)) throw std::runtime_error("Failed to set ATT disconnect handler\n");
@@ -513,7 +525,14 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
     {
         auto& svc     = that->ServiceAt(i);
         auto  svcuuid = svc.GetUUID();
-
+        if (!uuids.insert(svcuuid).second)
+        {
+            throw std::logic_error("Duplication Svc UUID found");
+        }
+        else
+        {
+            std::cout << "Register Service: " << (std::string)svcuuid << std::endl;
+        }
         /* Add Heart Rate Service */
         auto blzsvc    = new Bluez::Service();
         blzsvc->app    = this;
@@ -523,8 +542,12 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
         svc._handle.reset(blzsvc);
         for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
         {
-            auto&   chrc       = svc.CharacteristicAt(j);
-            auto    chrcuuid   = chrc.GetUUID();
+            auto& chrc     = svc.CharacteristicAt(j);
+            auto  chrcuuid = chrc.GetUUID();
+            if (!uuids.insert(chrcuuid).second)
+            {
+                throw std::logic_error("Duplication Chrc UUID found");
+            }
             uint8_t properties = 0;
             if (chrc.AllowNotification()) properties |= BT_GATT_CHRC_PROP_NOTIFY;
             if (chrc.IsReadSupported()) properties |= BT_GATT_CHRC_PROP_READ;
@@ -543,6 +566,9 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
                                                                blzchrc);
 
             blzchrc->handle = gatt_db_attribute_get_handle(blzchrc->attr);
+            std::cout << "Register Characteristic: " << (std::string)chrcuuid << " Handle:" << blzchrc->handle
+                      << " Chrc:" << static_cast<void*>(&chrc) << " Backend:" << static_cast<void*>(blzchrc) << std::endl;
+
             chrc._handle.reset(blzchrc);
         }
         gatt_db_service_set_active(blzsvc->attr, true);
