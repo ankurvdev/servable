@@ -48,6 +48,7 @@ set(EXCLUDES
     "advertising.c"
     "interactive.c"
     "shell.c"
+    "btsnoop.c"
 #    "log.c"
 )
 
