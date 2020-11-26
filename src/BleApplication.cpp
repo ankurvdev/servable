@@ -192,16 +192,66 @@ struct Characteristic : blegatt::IBackendHandler
     Service*                  svc{nullptr};
     blegatt::ICharacteristic* chrc{nullptr};
     uint16_t                  handle{};
+    uint16_t                  ccchandle{};
     struct gatt_db_attribute* attr{nullptr};
+    struct gatt_db_attribute* cccattr{nullptr};
+
+    static void ReadCCCCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr)
+    {
+        std::cout << std::endl << "CCC:Read:" << std::endl;
+
+        uint8_t  error   = offset > 2 ? BT_ATT_ERROR_INVALID_OFFSET : 0;
+        auto     blzchrc = reinterpret_cast<Characteristic*>(cbptr);
+        auto&    chrc    = blzchrc->chrc;
+        uint16_t value   = chrc->HasNotifications();
+
+        gatt_db_attribute_read_result(attrib, id, error, (uint8_t*)&value, 2);
+    }
+
+    static void WriteCCCCallback(gatt_db_attribute* attrib,
+                                 uint               id,
+                                 uint16_t           offset,
+                                 const uint8_t*     value,
+                                 size_t             len,
+                                 uint8_t            opcode,
+                                 bt_att*            att,
+                                 void*              cbptr)
+    {
+        std::cout << std::endl << "CCC:Write:" << (int)value[0] << std::endl;
+        uint8_t error = 0;
+
+        if (!value || len != 2)
+        {
+            gatt_db_attribute_write_result(attrib, id, BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN);
+            return;
+        }
+        if (offset > 0)
+        {
+            gatt_db_attribute_write_result(attrib, id, BT_ATT_ERROR_INVALID_OFFSET);
+            return;
+        }
+
+        auto  blzchrc = reinterpret_cast<Characteristic*>(cbptr);
+        auto& chrc    = blzchrc->chrc;
+        if (value[0] == 0x00)
+            chrc->DisableNotifications();
+        else if (value[0] == 0x01)
+            chrc->EnableNotifications();
+        else
+            error = 0x80;
+
+        /* updating a timer function to call notification on a periodic interval */
+        gatt_db_attribute_write_result(attrib, id, error);
+    }
 
     static void ReadCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr)
     {
         try
         {
-            auto blzchrc = reinterpret_cast<Characteristic*>(cbptr);
-            auto& chrc = blzchrc->chrc;
+            auto  blzchrc = reinterpret_cast<Characteristic*>(cbptr);
+            auto& chrc    = blzchrc->chrc;
             std::cout << "Requesting Read for Chrc: " << (std::string)chrc->GetUUID() << " Handle:" << blzchrc->handle
-                      << " Chrc:" << static_cast<void*>(chrc) << " Backend:" << static_cast<void*>(blzchrc) <<std::endl;
+                      << " Chrc:" << static_cast<void*>(chrc) << " Backend:" << static_cast<void*>(blzchrc) << std::endl;
             uint8_t buffer[24];
             auto    len = chrc->ReadValue(buffer);
             gatt_db_attribute_read_result(attrib, id, 0, buffer, len);
@@ -221,10 +271,17 @@ struct Characteristic : blegatt::IBackendHandler
                               uint8_t            opcode,
                               bt_att*            att,
                               void*              cbptr)
+
+    try
     {
         auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
         chrc->WriteValue({value, len});
         gatt_db_attribute_write_result(attrib, id, 0);
+    }
+    catch (std::exception const& ex)
+    {
+        std::cerr << "Error writing Char Value: " << ex.what() << std::endl;
+        gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
     }
 };
 
@@ -234,6 +291,11 @@ void blegatt::ICharacteristic::NotifyUpdated()
 {
     std::unique_lock<std::mutex> lock(globalMutex);
     if (!_handle.get()) return;
+    if (!HasNotifications())
+    {
+        return;
+    }
+
     auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
     uint8_t buffer[64];
     auto    bufsize = chrcbackend->chrc->ReadValue(std::span(buffer, std::size(buffer)));
@@ -565,6 +627,18 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
                                                                blzchrc);
 
             blzchrc->handle = gatt_db_attribute_get_handle(blzchrc->attr);
+            if (chrc.AllowNotification())
+            {
+                bt_uuid_t cccuuid;
+                bt_uuid16_create(&cccuuid, GATT_CLIENT_CHARAC_CFG_UUID);
+                gatt_db_service_add_descriptor(blzsvc->attr,
+                                               &cccuuid,
+                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+                                               Bluez::Characteristic::ReadCCCCallback,
+                                               Bluez::Characteristic::WriteCCCCallback,
+                                               blzchrc);
+            }
+
             std::cout << "Register Characteristic: " << (std::string)chrcuuid << " Handle:" << blzchrc->handle
                       << " Chrc:" << static_cast<void*>(&chrc) << " Backend:" << static_cast<void*>(blzchrc) << std::endl;
 
@@ -757,6 +831,7 @@ static void att_conn_callback(int fd, uint32_t events, void* user_data)
     printf("Connect from %s\n", ba);
 
     server->Init(new_fd, mtu);
+    std::cout << "Server Initialized" << std::endl;
 }
 
 static int l2cap_le_att_listen(bdaddr_t* src, uint8_t sec, uint8_t src_type)

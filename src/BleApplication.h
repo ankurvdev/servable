@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 #include <memory>
 #include <sdp.h>
 #include <span>
@@ -41,7 +42,20 @@ struct ICharacteristic
     virtual void   WriteValue(std::span<const uint8_t> data) = 0;
 
     void NotifyUpdated();
+    bool HasNotifications() { return _notificationsEnabled; }
+    void EnableNotifications()
+    {
+        _notificationsEnabled = true;
+        std::cout << "Enabling Notifications on: " << (std::string)GetUUID() << std::endl;
+    }
 
+    void DisableNotifications()
+    {
+        _notificationsEnabled = false;
+        std::cout << "Disabling Notifications on: " << (std::string)GetUUID() << std::endl;
+    }
+
+    bool                             _notificationsEnabled{false};
     std::unique_ptr<IBackendHandler> _handle;
 };
 
