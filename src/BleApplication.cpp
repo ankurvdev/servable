@@ -232,7 +232,6 @@ struct Characteristic : blegatt::IBackendHandler
 
 void blegatt::ICharacteristic::NotifyUpdated()
 {
-    return;
     std::unique_lock<std::mutex> lock(globalMutex);
     if (!_handle.get()) return;
     auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
