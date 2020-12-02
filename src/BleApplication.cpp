@@ -64,25 +64,30 @@ extern "C"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
 
+#include <atomic>
+#include <chrono>
 #include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-struct main_opts         main_opts;
-static std::mutex        globalMutex;
-static bool              restart = false;
+static std::mutex globalMutex;
+static bool       restart = false;
+using time_point          = std::chrono::time_point<std::chrono::system_clock>;
+using namespace std::chrono_literals;
+
 template <typename T> T* check_not_null(T* val, std::string_view const& errMessage)
 {
     if (val == nullptr) throw std::runtime_error(std::string(errMessage));
@@ -144,13 +149,10 @@ void btd_exit(void)
     mainloop_quit();
 }
 
-struct ChrcBackend
-{
-    blegatt::ICharacteristic* chrc;
-};
-
 namespace Bluez
 {
+struct Characteristic;
+
 struct Application : blegatt::IBackendHandler
 {
     Application(int index);
@@ -193,11 +195,66 @@ struct Characteristic : blegatt::IBackendHandler
     blegatt::ICharacteristic* chrc{nullptr};
     uint16_t                  handle{};
     uint16_t                  ccchandle{};
+    time_point                notificationQueuedAt{};
+    time_point                lastNotified{};
+    std::atomic<uint32_t>     pendingNotifications{};
     struct gatt_db_attribute* attr{nullptr};
     struct gatt_db_attribute* cccattr{nullptr};
 
-    static void ReadCCCCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr)
+    bool SendNotification()
     {
+        auto pendingCount = this->pendingNotifications.exchange(0);
+        if (pendingCount > 0) try
+            {
+                std::unique_lock<std::mutex> lock(globalMutex);
+
+                auto now      = time_point::clock::now();
+                auto queuedat = this->notificationQueuedAt;
+
+                uint8_t buffer[64];
+                auto    bufsize = this->chrc->ReadValue(std::span(buffer, std::size(buffer)));
+                if (!bt_gatt_server_send_notification(this->app->gatt, this->handle, buffer, bufsize, false))
+                {
+                    throw std::runtime_error("Cannot send a notification");
+                }
+
+                this->lastNotified = now;
+
+                auto latency = (now - queuedat);
+                if (pendingCount > 1 || latency > 500ms)
+                {
+                    std::cout << "Possible Latency" << (std::string)this->chrc->GetUUID() << std::endl;
+                }
+                return true;
+            }
+            catch (std::exception const& ex)
+            {
+                std::cerr << "Faied to Send Notification for : " << (std::string)(this->chrc->GetUUID()) << " :: " << ex.what()
+                          << std::endl;
+            }
+        return false;
+    }
+
+    void MarkNotificationPending()
+    {
+        if (pendingNotifications == 0)
+        {
+            notificationQueuedAt = time_point::clock::now();
+        }
+
+        pendingNotifications++;
+
+        /* TODO */ timeout_add(
+            1, [](void* ptr) { return reinterpret_cast<Characteristic*>(ptr)->SendNotification(); }, this, NULL);
+
+        // app->WakeUpNotificationHandler();
+    }
+
+    static void ReadCCCCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr) noexcept
+    try
+    {
+        std::unique_lock<std::mutex> lock(globalMutex);
+
         std::cout << std::endl << "CCC:Read:" << std::endl;
 
         uint8_t  error   = offset > 2 ? BT_ATT_ERROR_INVALID_OFFSET : 0;
@@ -207,6 +264,11 @@ struct Characteristic : blegatt::IBackendHandler
 
         gatt_db_attribute_read_result(attrib, id, error, (uint8_t*)&value, 2);
     }
+    catch (std::exception const& ex)
+    {
+        std::cerr << "Error ReadCCCCallback: " << ex.what() << std::endl;
+        gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
+    }
 
     static void WriteCCCCallback(gatt_db_attribute* attrib,
                                  uint               id,
@@ -215,8 +277,11 @@ struct Characteristic : blegatt::IBackendHandler
                                  size_t             len,
                                  uint8_t            opcode,
                                  bt_att*            att,
-                                 void*              cbptr)
+                                 void*              cbptr) noexcept
+    try
     {
+        std::unique_lock<std::mutex> lock(globalMutex);
+
         std::cout << std::endl << "CCC:Write:" << (int)value[0] << std::endl;
         uint8_t error = 0;
 
@@ -243,11 +308,18 @@ struct Characteristic : blegatt::IBackendHandler
         /* updating a timer function to call notification on a periodic interval */
         gatt_db_attribute_write_result(attrib, id, error);
     }
+    catch (std::exception const& ex)
+    {
+        std::cerr << "Error WriteCCCCallback: " << ex.what() << std::endl;
+        gatt_db_attribute_write_result(attrib, id, -1);
+    }
 
     static void ReadCallback(gatt_db_attribute* attrib, uint id, uint16_t offset, uint8_t opcode, bt_att* att, void* cbptr)
     {
         try
         {
+            std::unique_lock<std::mutex> lock(globalMutex);
+
             auto  blzchrc = reinterpret_cast<Characteristic*>(cbptr);
             auto& chrc    = blzchrc->chrc;
             std::cout << "Requesting Read for Chrc: " << (std::string)chrc->GetUUID() << " Handle:" << blzchrc->handle
@@ -274,14 +346,15 @@ struct Characteristic : blegatt::IBackendHandler
 
     try
     {
-        auto& chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
+        std::unique_lock<std::mutex> lock(globalMutex);
+        auto&                        chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
         chrc->WriteValue({value, len});
         gatt_db_attribute_write_result(attrib, id, 0);
     }
     catch (std::exception const& ex)
     {
         std::cerr << "Error writing Char Value: " << ex.what() << std::endl;
-        gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
+        gatt_db_attribute_write_result(attrib, id, -1);
     }
 };
 
@@ -289,17 +362,14 @@ struct Characteristic : blegatt::IBackendHandler
 
 void blegatt::ICharacteristic::NotifyUpdated()
 {
-    std::unique_lock<std::mutex> lock(globalMutex);
     if (!_handle.get()) return;
     if (!HasNotifications())
     {
         return;
     }
 
-    auto    chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
-    uint8_t buffer[64];
-    auto    bufsize = chrcbackend->chrc->ReadValue(std::span(buffer, std::size(buffer)));
-    bt_gatt_server_send_notification(chrcbackend->app->gatt, chrcbackend->handle, buffer, bufsize, false);
+    auto chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
+    chrcbackend->MarkNotificationPending();
 }
 
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -858,6 +928,7 @@ static int l2cap_le_att_listen(bdaddr_t* src, uint8_t sec, uint8_t src_type)
     check_rc(listen(sk, 10), "Listening on socket failed");
     return sk;
 }
+
 void blegatt::IApplication::Start()
 {
     uint8_t src_type = BDADDR_LE_PUBLIC;
