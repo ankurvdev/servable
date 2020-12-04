@@ -207,9 +207,7 @@ struct Characteristic : blegatt::IBackendHandler
         if (pendingCount > 0) try
             {
                 std::unique_lock<std::mutex> lock(globalMutex);
-
-                auto now      = time_point::clock::now();
-                auto queuedat = this->notificationQueuedAt;
+                auto                         now = time_point::clock::now();
 
                 uint8_t buffer[64];
                 auto    bufsize = this->chrc->ReadValue(std::span(buffer, std::size(buffer)));
@@ -219,12 +217,6 @@ struct Characteristic : blegatt::IBackendHandler
                 }
 
                 this->lastNotified = now;
-
-                auto latency = (now - queuedat);
-                if (pendingCount > 1 || latency > 500ms)
-                {
-                    std::cout << "Possible Latency" << (std::string)this->chrc->GetUUID() << std::endl;
-                }
                 return true;
             }
             catch (std::exception const& ex)
@@ -411,13 +403,13 @@ static void att_disconnect_cb(int err, void* user_data)
     restart = true;
     mainloop_quit();
 }
-
+#if (defined ATT_DEBUG)
 static void att_debug_cb(const char* str, void* user_data)
 {
     const char* prefix = reinterpret_cast<const char*>(user_data);
     PRLOG(COLOR_BOLDGRAY "%s" COLOR_BOLDWHITE "%s\n" COLOR_OFF, prefix, str);
 }
-
+#endif
 static void gatt_debug_cb(const char* str, void* user_data)
 {
     const char* prefix = reinterpret_cast<const char*>(user_data);
@@ -645,8 +637,9 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
     if (!bt_att_register_disconnect(att, att_disconnect_cb, NULL, NULL)) throw std::runtime_error("Failed to set ATT disconnect handler\n");
 
     gatt = check_not_null(bt_gatt_server_new(db, att, mtu, 0), "Failed to create GATT server");
-
+#if (defined ATT_DEBUG)
     bt_att_set_debug(att, att_debug_cb, (void*)"att: ", NULL);
+#endif
     bt_gatt_server_set_debug(gatt, gatt_debug_cb, (void*)"server: ", NULL);
 
     populate_gap_service(this);
