@@ -247,12 +247,15 @@ struct Characteristic : blegatt::IBackendHandler
     {
         std::unique_lock<std::mutex> lock(globalMutex);
 
-        std::cout << std::endl << "CCC:Read:" << std::endl;
+        uint8_t error   = offset > 2 ? BT_ATT_ERROR_INVALID_OFFSET : 0;
+        auto    blzchrc = reinterpret_cast<Characteristic*>(cbptr);
+        auto&   chrc    = blzchrc->chrc;
 
-        uint8_t  error   = offset > 2 ? BT_ATT_ERROR_INVALID_OFFSET : 0;
-        auto     blzchrc = reinterpret_cast<Characteristic*>(cbptr);
-        auto&    chrc    = blzchrc->chrc;
-        uint16_t value   = chrc->HasNotifications();
+        std::cout << std::endl
+                  << "CCC:Read:UUID:" << (std::string)chrc->GetUUID() << " Handle:" << blzchrc->handle
+                  << " Chrc:" << static_cast<void*>(chrc) << " Backend:" << static_cast<void*>(blzchrc) << std::endl;
+
+        uint16_t value = chrc->HasNotifications();
 
         gatt_db_attribute_read_result(attrib, id, error, (uint8_t*)&value, 2);
     }
@@ -274,22 +277,27 @@ struct Characteristic : blegatt::IBackendHandler
     {
         std::unique_lock<std::mutex> lock(globalMutex);
 
-        std::cout << std::endl << "CCC:Write:" << (int)value[0] << std::endl;
         uint8_t error = 0;
 
         if (!value || len != 2)
         {
+            std::cout << std::endl << "CCC:Write: Invalid Value" << std::endl;
             gatt_db_attribute_write_result(attrib, id, BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN);
             return;
         }
         if (offset > 0)
         {
+            std::cout << std::endl << "CCC:Write: Invalid Offset" << std::endl;
             gatt_db_attribute_write_result(attrib, id, BT_ATT_ERROR_INVALID_OFFSET);
             return;
         }
 
         auto  blzchrc = reinterpret_cast<Characteristic*>(cbptr);
         auto& chrc    = blzchrc->chrc;
+        std::cout << std::endl
+                  << "CCC:Write:" << (int)value[0] << "UUID:" << (std::string)chrc->GetUUID() << " Handle:" << blzchrc->handle
+                  << " Chrc:" << static_cast<void*>(chrc) << " Backend:" << static_cast<void*>(blzchrc) << std::endl;
+
         if (value[0] == 0x00)
             chrc->DisableNotifications();
         else if (value[0] == 0x01)
