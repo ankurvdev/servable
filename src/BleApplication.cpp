@@ -64,9 +64,9 @@ extern "C"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
@@ -557,25 +557,33 @@ static void populate_gap_service(Bluez::Application* server)
 
     /* Add the GAP service */
     bt_uuid16_create(&uuid, UUID_GAP);
-    service = gatt_db_add_service(server->db, &uuid, true, 6);
+    service = check_not_null(gatt_db_add_service(server->db, &uuid, true, 6), "Failed to add GAP service");
 
     /*
      * Device Name characteristic. Make the value dynamically read and
      * written via callbacks.
      */
     bt_uuid16_create(&uuid, GATT_CHARAC_DEVICE_NAME);
-    gatt_db_service_add_characteristic(
-        service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_EXT_PROP, gap_device_name_read_cb, nullptr, server);
+    check_not_null(gatt_db_service_add_characteristic(service,
+                                                      &uuid,
+                                                      BT_ATT_PERM_READ,
+                                                      BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_EXT_PROP,
+                                                      gap_device_name_read_cb,
+                                                      nullptr,
+                                                      server),
+                   "Failed to Add Device Name chrc to GAP service");
 
     bt_uuid16_create(&uuid, GATT_CHARAC_EXT_PROPER_UUID);
-    gatt_db_service_add_descriptor(service, &uuid, BT_ATT_PERM_READ, gap_device_name_ext_prop_read_cb, NULL, server);
+    check_not_null(gatt_db_service_add_descriptor(service, &uuid, BT_ATT_PERM_READ, gap_device_name_ext_prop_read_cb, NULL, server),
+                   "Faied to add ext_proper chrc to GAP service");
 
     /*
      * Appearance characteristic. Reads and writes should obtain the value
      * from the database.
      */
     bt_uuid16_create(&uuid, GATT_CHARAC_APPEARANCE);
-    tmp = gatt_db_service_add_characteristic(service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ, NULL, NULL, server);
+    tmp = check_not_null(gatt_db_service_add_characteristic(service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ, NULL, NULL, server),
+                         "Faied to add Appearance chrc to GAP service");
 
     /*
      * Write the appearance value to the database, since we're not using a
@@ -594,16 +602,21 @@ static void populate_gatt_service(Bluez::Application* server)
 
     /* Add the GATT service */
     bt_uuid16_create(&uuid, UUID_GATT);
-    service = gatt_db_add_service(server->db, &uuid, true, 4);
+    service = check_not_null(gatt_db_add_service(server->db, &uuid, true, 4), "Failed to add GATT service");
 
     bt_uuid16_create(&uuid, GATT_CHARAC_SERVICE_CHANGED);
-    svc_chngd = gatt_db_service_add_characteristic(
-        service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE, gatt_service_changed_cb, NULL, server);
+    svc_chngd = check_not_null(
+        gatt_db_service_add_characteristic(
+            service, &uuid, BT_ATT_PERM_READ, BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE, gatt_service_changed_cb, NULL, server),
+        "Failed to Add Svc-Changed chrc to GATT service");
+
     server->gatt_svc_chngd_handle = gatt_db_attribute_get_handle(svc_chngd);
 
     bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
-    gatt_db_service_add_descriptor(
-        service, &uuid, BT_ATT_PERM_READ | BT_ATT_PERM_WRITE, gatt_svc_chngd_ccc_read_cb, gatt_svc_chngd_ccc_write_cb, server);
+    check_not_null(
+        gatt_db_service_add_descriptor(
+            service, &uuid, BT_ATT_PERM_READ | BT_ATT_PERM_WRITE, gatt_svc_chngd_ccc_read_cb, gatt_svc_chngd_ccc_write_cb, server),
+        "Failed to Chrc Config Chrc to Descp to Chrc");
 
     gatt_db_service_set_active(service, true);
 }
@@ -665,11 +678,10 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
         {
             std::cout << "Register Service: " << (std::string)svcuuid << std::endl;
         }
-        /* Add Heart Rate Service */
         auto blzsvc    = new Bluez::Service();
         blzsvc->app    = this;
         blzsvc->svc    = &svc;
-        blzsvc->attr   = gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */);
+        blzsvc->attr   = check_not_null(gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */), "Cannot add Application Service");
         blzsvc->handle = gatt_db_attribute_get_handle(blzsvc->attr);
         svc._handle.reset(blzsvc);
         for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
@@ -689,25 +701,27 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
             blzchrc->svc  = blzsvc;
             blzchrc->app  = this;
             blzchrc->chrc = &chrc;
-            blzchrc->attr = gatt_db_service_add_characteristic(blzsvc->attr,
-                                                               &chrcuuid,
-                                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-                                                               properties,
-                                                               Bluez::Characteristic::ReadCallback,
-                                                               Bluez::Characteristic::WriteCallback,
-                                                               blzchrc);
+            blzchrc->attr = check_not_null(gatt_db_service_add_characteristic(blzsvc->attr,
+                                                                              &chrcuuid,
+                                                                              BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+                                                                              properties,
+                                                                              Bluez::Characteristic::ReadCallback,
+                                                                              Bluez::Characteristic::WriteCallback,
+                                                                              blzchrc),
+                                           "Add Characteristic");
 
             blzchrc->handle = gatt_db_attribute_get_handle(blzchrc->attr);
             if (chrc.AllowNotification())
             {
                 bt_uuid_t cccuuid;
                 bt_uuid16_create(&cccuuid, GATT_CLIENT_CHARAC_CFG_UUID);
-                gatt_db_service_add_descriptor(blzsvc->attr,
-                                               &cccuuid,
-                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-                                               Bluez::Characteristic::ReadCCCCallback,
-                                               Bluez::Characteristic::WriteCCCCallback,
-                                               blzchrc);
+                check_not_null(gatt_db_service_add_descriptor(blzsvc->attr,
+                                                              &cccuuid,
+                                                              BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+                                                              Bluez::Characteristic::ReadCCCCallback,
+                                                              Bluez::Characteristic::WriteCCCCallback,
+                                                              blzchrc), 
+                                                              "Cannot add Chrc Config Descriptor to Chrc");
             }
 
             std::cout << "Register Characteristic: " << (std::string)chrcuuid << " Handle:" << blzchrc->handle
