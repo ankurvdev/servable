@@ -134,6 +134,9 @@ struct IApplication
 
     void Start();
 
+    // private:
+    void _StartImpl();
+
     std::unique_ptr<IBackendHandler> _handle;
 };
 

@@ -678,10 +678,11 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
         {
             std::cout << "Register Service: " << (std::string)svcuuid << std::endl;
         }
-        auto blzsvc    = new Bluez::Service();
-        blzsvc->app    = this;
-        blzsvc->svc    = &svc;
-        blzsvc->attr   = check_not_null(gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */), "Cannot add Application Service");
+        auto blzsvc = new Bluez::Service();
+        blzsvc->app = this;
+        blzsvc->svc = &svc;
+        blzsvc->attr
+            = check_not_null(gatt_db_add_service(db, &svcuuid, true, 8 /* TODO: Figure out the count */), "Cannot add Application Service");
         blzsvc->handle = gatt_db_attribute_get_handle(blzsvc->attr);
         svc._handle.reset(blzsvc);
         for (size_t j = 0; j < svc.CharacteristicsCount(); j++)
@@ -720,8 +721,8 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
                                                               BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
                                                               Bluez::Characteristic::ReadCCCCallback,
                                                               Bluez::Characteristic::WriteCCCCallback,
-                                                              blzchrc), 
-                                                              "Cannot add Chrc Config Descriptor to Chrc");
+                                                              blzchrc),
+                               "Cannot add Chrc Config Descriptor to Chrc");
             }
 
             std::cout << "Register Characteristic: " << (std::string)chrcuuid << " Handle:" << blzchrc->handle
@@ -946,6 +947,15 @@ static int l2cap_le_att_listen(bdaddr_t* src, uint8_t sec, uint8_t src_type)
 
 void blegatt::IApplication::Start()
 {
+    while (restart)
+    {
+        restart = false;
+        _StartImpl();
+    }
+}
+
+void blegatt::IApplication::_StartImpl()
+{
     uint8_t src_type = BDADDR_LE_PUBLIC;
 
     mainloop_init();
@@ -979,10 +989,5 @@ void blegatt::IApplication::Start()
         this->_handle.reset(nullptr);
         // mainloop_quit();
         printf("\n\nShutting down...\n");
-    }
-    if (restart)
-    {
-        restart = false;
-        Start();
     }
 }
