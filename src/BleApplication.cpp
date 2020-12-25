@@ -84,7 +84,7 @@ extern "C"
 #include <vector>
 
 static std::mutex globalMutex;
-static bool       restart = false;
+static bool       restart = true;
 using time_point          = std::chrono::time_point<std::chrono::system_clock>;
 using namespace std::chrono_literals;
 
@@ -956,6 +956,7 @@ void blegatt::IApplication::Start()
 
 void blegatt::IApplication::_StartImpl()
 {
+    std::cout << "Start BLE Application" << std::endl;
     uint8_t src_type = BDADDR_LE_PUBLIC;
 
     mainloop_init();
