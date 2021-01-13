@@ -4,6 +4,7 @@
 #include <sdp.h>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <uuid.h>
 
 namespace blegatt
@@ -133,11 +134,13 @@ struct IApplication
     virtual IService& ServiceAt(size_t index) = 0;
 
     void Start();
+    void Stop();
 
     // private:
     void _StartImpl();
 
     std::unique_ptr<IBackendHandler> _handle;
+    std::jthread                     _thrd;
 };
 
 template <typename... TChrs> using AdvService   = Service<TChrs...>;

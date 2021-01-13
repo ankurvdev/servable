@@ -947,11 +947,16 @@ static int l2cap_le_att_listen(bdaddr_t* src, uint8_t sec, uint8_t src_type)
 
 void blegatt::IApplication::Start()
 {
-    while (restart)
-    {
-        restart = false;
-        _StartImpl();
-    }
+    _thrd = std::jthread([this](std::stop_token stoken) {
+        while (!stoken.stop_requested()) _StartImpl();
+    });
+}
+
+void blegatt::IApplication::Stop()
+{
+    _thrd.request_stop();
+    mainloop_quit();
+    _thrd.join();
 }
 
 void blegatt::IApplication::_StartImpl()
