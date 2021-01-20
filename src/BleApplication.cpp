@@ -952,6 +952,17 @@ void blegatt::IApplication::Start()
     });
 }
 
+blegatt::IApplication::IApplication()
+{
+    auto server = new Bluez::Application(0);
+    server->app = this;
+    this->_handle.reset(server);
+}
+
+blegatt::IApplication::~IApplication()
+{
+}
+
 void blegatt::IApplication::Stop()
 {
     _thrd.request_stop();
@@ -961,18 +972,11 @@ void blegatt::IApplication::Stop()
 
 void blegatt::IApplication::_StartImpl()
 {
+    auto server = reinterpret_cast<Bluez::Application*>(this->_handle.get());
     std::cout << "Start BLE Application" << std::endl;
     uint8_t src_type = BDADDR_LE_PUBLIC;
-
     mainloop_init();
-
-    auto server = new Bluez::Application(0);
-
     FileDescriptor fd(l2cap_le_att_listen(&server->addr, BT_SECURITY_LOW, src_type));
-
-    server->app = this;
-    this->_handle.reset(server);
-
     check_rc(mainloop_add_fd(fd, EPOLLIN, att_conn_callback, server, NULL), "Erro adding connection callback to mainloop");
     advertise(server);
 #if 0

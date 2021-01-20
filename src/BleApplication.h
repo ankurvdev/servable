@@ -127,6 +127,9 @@ template <typename... TChrs> struct Service : IService
 
 struct IApplication
 {
+    IApplication();
+    virtual ~IApplication();
+
     virtual UUID             GetUUID() const = 0;
     virtual std::string_view Name() const    = 0;
 
