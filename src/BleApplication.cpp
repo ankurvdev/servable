@@ -9,8 +9,6 @@
  *
  *
  */
-extern "C"
-{
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -33,6 +31,8 @@ extern "C"
 
 #include <dbus/dbus.h>
 
+extern "C"
+{
 #include "lib/bluetooth.h"
 
 #include "gdbus/gdbus.h"
