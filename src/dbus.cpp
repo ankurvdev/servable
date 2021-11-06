@@ -17,13 +17,10 @@ try
 {
     std::cerr << "Called unimplemented sym : " << sym << std::endl;
     throw std::logic_error(sym);
-}
-catch (...)
-{
-}
+} catch (...)
+{}
 void UndefinedFunc(const char* sym)
-{
-}
+{}
 #define DUMMY_DEFINE(sym)         \
     extern "C" int sym()          \
     {                             \

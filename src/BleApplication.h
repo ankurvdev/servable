@@ -116,23 +116,14 @@ template <typename... TChrs> struct Service : IService
 
     template <size_t N> ICharacteristic& _GetAt(size_t index)
     {
-        if (index == N)
-        {
-            return std::get<N>(_chrs);
-        }
-        if constexpr (N > 0)
-        {
-            return _GetAt<N - 1>(index);
-        }
+        if (index == N) { return std::get<N>(_chrs); }
+        if constexpr (N > 0) { return _GetAt<N - 1>(index); }
         throw std::out_of_range("Cannot determine the chars");
     }
 
     virtual ICharacteristic& CharacteristicAt(size_t index) override
     {
-        if (index >= sizeof...(TChrs))
-        {
-            throw std::out_of_range("Cannot determine the chars");
-        }
+        if (index >= sizeof...(TChrs)) { throw std::out_of_range("Cannot determine the chars"); }
         return _GetAt<sizeof...(TChrs) - 1>(index);
     }
 

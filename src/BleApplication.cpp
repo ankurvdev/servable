@@ -64,9 +64,9 @@ extern "C"
 #undef class
 }
 
-#define DEFAULT_PAIRABLE_TIMEOUT 0 /* disabled */
+#define DEFAULT_PAIRABLE_TIMEOUT 0       /* disabled */
 #define DEFAULT_DISCOVERABLE_TIMEOUT 180 /* 3 minutes */
-#define DEFAULT_TEMPORARY_TIMEOUT 30 /* 30 seconds */
+#define DEFAULT_TEMPORARY_TIMEOUT 30     /* 30 seconds */
 
 #define SHUTDOWN_GRACE_SECONDS 10
 #include "BleApplication.h"
@@ -118,10 +118,7 @@ template <typename T> struct CMem
     template <typename TFunc> CMem(TFunc&& f)
     {
         ptr = reinterpret_cast<T*>(f());
-        if (ptr == nullptr)
-        {
-            throw std::runtime_error("Empty Return");
-        }
+        if (ptr == nullptr) { throw std::runtime_error("Empty Return"); }
     }
     ~CMem() { free(ptr); }
 
@@ -218,8 +215,7 @@ struct Characteristic : blegatt::IBackendHandler
 
                 this->lastNotified = now;
                 return true;
-            }
-            catch (std::exception const& ex)
+            } catch (std::exception const& ex)
             {
                 std::cerr << "Faied to Send Notification for : " << (std::string)(this->chrc->GetUUID()) << " :: " << ex.what()
                           << std::endl;
@@ -229,10 +225,7 @@ struct Characteristic : blegatt::IBackendHandler
 
     void MarkNotificationPending()
     {
-        if (pendingNotifications == 0)
-        {
-            notificationQueuedAt = time_point::clock::now();
-        }
+        if (pendingNotifications == 0) { notificationQueuedAt = time_point::clock::now(); }
 
         pendingNotifications++;
 
@@ -258,8 +251,7 @@ struct Characteristic : blegatt::IBackendHandler
         uint16_t value = chrc->HasNotifications();
 
         gatt_db_attribute_read_result(attrib, id, error, (uint8_t*)&value, 2);
-    }
-    catch (std::exception const& ex)
+    } catch (std::exception const& ex)
     {
         std::cerr << "Error ReadCCCCallback: " << ex.what() << std::endl;
         gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
@@ -307,8 +299,7 @@ struct Characteristic : blegatt::IBackendHandler
 
         /* updating a timer function to call notification on a periodic interval */
         gatt_db_attribute_write_result(attrib, id, error);
-    }
-    catch (std::exception const& ex)
+    } catch (std::exception const& ex)
     {
         std::cerr << "Error WriteCCCCallback: " << ex.what() << std::endl;
         gatt_db_attribute_write_result(attrib, id, -1);
@@ -327,8 +318,7 @@ struct Characteristic : blegatt::IBackendHandler
             uint8_t buffer[24];
             auto    len = chrc->ReadValue(buffer);
             gatt_db_attribute_read_result(attrib, id, 0, buffer, len);
-        }
-        catch (std::exception const& ex)
+        } catch (std::exception const& ex)
         {
             std::cerr << "Error reading Char Value: " << ex.what() << std::endl;
             gatt_db_attribute_read_result(attrib, id, -1, nullptr, 0);
@@ -350,8 +340,7 @@ struct Characteristic : blegatt::IBackendHandler
         auto&                        chrc = reinterpret_cast<Characteristic*>(cbptr)->chrc;
         chrc->WriteValue({value, len});
         gatt_db_attribute_write_result(attrib, id, 0);
-    }
-    catch (std::exception const& ex)
+    } catch (std::exception const& ex)
     {
         std::cerr << "Error writing Char Value: " << ex.what() << std::endl;
         gatt_db_attribute_write_result(attrib, id, -1);
@@ -363,10 +352,7 @@ struct Characteristic : blegatt::IBackendHandler
 void blegatt::ICharacteristic::NotifyUpdated()
 {
     if (!_handle.get()) return;
-    if (!HasNotifications())
-    {
-        return;
-    }
+    if (!HasNotifications()) { return; }
 
     auto chrcbackend = reinterpret_cast<Bluez::Characteristic*>(_handle.get());
     chrcbackend->MarkNotificationPending();
@@ -387,8 +373,7 @@ void blegatt::ICharacteristic::NotifyUpdated()
 #define ATT_CID 4
 
 #define PRLOG(...)           \
-    do                       \
-    {                        \
+    do {                     \
         printf(__VA_ARGS__); \
     } while (0)
 
@@ -670,10 +655,7 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
     {
         auto& svc     = that->ServiceAt(i);
         auto  svcuuid = svc.GetUUID();
-        if (!uuids.insert(svcuuid).second)
-        {
-            throw std::logic_error("Duplication Svc UUID found");
-        }
+        if (!uuids.insert(svcuuid).second) { throw std::logic_error("Duplication Svc UUID found"); }
         else
         {
             std::cout << "Register Service: " << (std::string)svcuuid << std::endl;
@@ -689,10 +671,7 @@ void Bluez::Application::Init(int fd, uint16_t mtu)
         {
             auto& chrc     = svc.CharacteristicAt(j);
             auto  chrcuuid = chrc.GetUUID();
-            if (!uuids.insert(chrcuuid).second)
-            {
-                throw std::logic_error("Duplication Chrc UUID found");
-            }
+            if (!uuids.insert(chrcuuid).second) { throw std::logic_error("Duplication Chrc UUID found"); }
             uint8_t properties = 0;
             if (chrc.AllowNotification()) properties |= BT_GATT_CHRC_PROP_NOTIFY;
             if (chrc.IsReadSupported()) properties |= BT_GATT_CHRC_PROP_READ;
@@ -767,10 +746,7 @@ static std::vector<uint8_t> bt_ad_generate_data(Bluez::Application* server)
     bt_ad_unref(data);
     std::vector<uint8_t> rslt;
     rslt.reserve(adv_data_len);
-    for (size_t i = 0; i < adv_data_len; i++)
-    {
-        rslt.push_back(adv_data[i]);
-    }
+    for (size_t i = 0; i < adv_data_len; i++) { rslt.push_back(adv_data[i]); }
     free(adv_data);
     return rslt;
 }
@@ -960,8 +936,7 @@ blegatt::IApplication::IApplication()
 }
 
 blegatt::IApplication::~IApplication()
-{
-}
+{}
 
 void blegatt::IApplication::Stop()
 {

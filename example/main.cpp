@@ -62,8 +62,7 @@ try
     AvidServer server;
     server.Start();
     return 0;
-}
-catch (std::exception const& ex)
+} catch (std::exception const& ex)
 {
     // std::cerr << ex.what() << std::endl;
     return -1;
